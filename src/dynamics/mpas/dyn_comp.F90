@@ -272,9 +272,10 @@ subroutine dyn_init(dyn_in, dyn_out)
    call mpas_pool_get_array(diag_pool,  'uReconstructMeridional', dyn_out % uy)
    call mpas_pool_get_array(diag_pool,  'pressure',               dyn_out % pmid)
 
-   call read_phis(dyn_in)
-
-   ! At this point, we could set up zgrid, zz, fzm, and fzp
+   !
+   ! Read or compute all time-invariant fields
+   !
+   call setup_time_invariant(dyn_in)
 
    if (initial_run) then
       call read_inidat(dyn_in)
@@ -603,6 +604,38 @@ subroutine read_inidat(dyn_in)
    rho_tend(:,:) = 0.0_r8
 
 end subroutine read_inidat
+
+!========================================================================================
+
+subroutine setup_time_invariant(dyn_in)
+
+   ! Initialize all time-invariant fields needed by the MPAS-Atmosphere dycore, either
+   ! by reading these fields from CAM's initial file or by computing them
+
+   use cam_initfiles,      only : initial_file_get_id
+   use cam_mpas_subdriver, only : cam_mpas_read_static
+
+   implicit none
+
+   ! Arguments
+   type (dyn_import_t), target, intent(inout) :: dyn_in   ! dynamics import
+
+   ! Local variables
+   type(file_desc_t), pointer :: fh_ini
+
+
+   ! Read topography field
+   call read_phis(dyn_in)
+
+   ! Read other time-invariant fields
+   fh_ini => initial_file_get_id()
+   call cam_mpas_read_static(fh_ini, endrun)
+
+   ! At present, all time-invariant fields are read from the file descriptor provided
+   ! by initial_file_get_id(), but in future, some of these fields could be computed
+   ! here based on other fields that were read
+
+end subroutine setup_time_invariant
 
 !========================================================================================
 
