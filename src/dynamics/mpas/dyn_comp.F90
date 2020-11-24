@@ -1309,8 +1309,7 @@ subroutine cam_mpas_namelist_read(namelistFilename, configPool)
          if (ierr2 /= 0) then
             call endrun(subname // ':: Failed to read namelist group &decomposition')
          end if
-      else
-         call endrun(subname // ':: Failed to find namelist group &decomposition')
+      ! no else clause needed.  &decomposition is not present for single task runs.
       end if
    end if
 
