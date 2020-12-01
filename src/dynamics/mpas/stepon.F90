@@ -9,8 +9,7 @@ use ppgrid,         only: begchunk, endchunk
 use physics_types,  only: physics_state, physics_tend
 use physics_buffer, only: physics_buffer_desc
 
-use dyn_comp,       only: dyn_import_t, dyn_export_t, dyn_run, dyn_final, &
-                          swap_time_level_ptrs
+use dyn_comp,       only: dyn_import_t, dyn_export_t, dyn_run, dyn_final
 
 use dp_coupling,    only: d_p_coupling, p_d_coupling
 
@@ -92,9 +91,7 @@ subroutine stepon_run1(dtime_out, phys_state, phys_tend, &
    ! This call writes the dycore output (on the dynamics grids) to the
    ! history file.  Note that when nstep=0, these fields will be the result
    ! of the dynamics initialization (done in dyn_init) since the dycore
-   ! does not run and dyn_in is simply copied to dyn_out for use in the cam
-   ! initialization sequence.  On subsequent calls dyn_out will contain the
-   ! dycore output.
+   ! does not run and dyn_in points to the same memory as dyn_out.
    call write_dynvar(dyn_out)
    
    call t_barrierf('sync_d_p_coupling', mpicom)
@@ -103,18 +100,6 @@ subroutine stepon_run1(dtime_out, phys_state, phys_tend, &
    call d_p_coupling (phys_state, phys_tend, pbuf2d, dyn_out)
    call t_stopf('d_p_coupling')
    
-   ! Update pointers for prognostic fields if necessary.  Note that this shift
-   ! should not take place the first time stepon_run1 is called which is during
-   ! the CAM initialization sequence before the dycore is called.  Nor should it
-   ! occur for the first step of a restart run.
-   if (.not. is_first_step() .and. &
-       .not. is_first_restart_step() .and. &
-       swap_time_level_ptrs) then
-
-      call shift_time_levels(dyn_in, dyn_out)
-
-   end if
-
 end subroutine stepon_run1
 
 !=========================================================================================
@@ -355,44 +340,5 @@ subroutine write_forcings(dyn_in)
 end subroutine write_forcings
 
 !========================================================================================
-
-subroutine shift_time_levels(dyn_in, dyn_out)
-
-   ! The MPAS dycore swaps the pool time indices after each timestep
-   ! (mpas_dt).  If an odd number of these shifts occur during the CAM
-   ! timestep (i.e., the dynamics/physics coupling interval), then CAM
-   ! needs a corresponding update to the pointers in the dyn_in and dyn_out
-   ! objects.
-
-   ! arguments
-   type (dyn_import_t), intent(inout)  :: dyn_in
-   type (dyn_export_t), intent(inout)  :: dyn_out
-
-   ! local variables
-   real(r8), dimension(:,:),   pointer :: ptr2d
-   real(r8), dimension(:,:,:), pointer :: ptr3d
-   !--------------------------------------------------------------------------------------
-
-   ptr2d             => dyn_out % uperp
-   dyn_out % uperp   => dyn_in % uperp
-   dyn_in % uperp    => ptr2d
-
-   ptr2d             => dyn_out % w
-   dyn_out % w       => dyn_in % w
-   dyn_in % w        => ptr2d
-
-   ptr2d             => dyn_out % theta_m
-   dyn_out % theta_m => dyn_in % theta_m
-   dyn_in % theta_m  => ptr2d
-
-   ptr2d             => dyn_out % rho_zz
-   dyn_out % rho_zz  => dyn_in % rho_zz
-   dyn_in % rho_zz   => ptr2d
-
-   ptr3d             => dyn_out % tracers
-   dyn_out % tracers => dyn_in % tracers
-   dyn_in % tracers  => ptr3d
-
-end subroutine shift_time_levels
 
 end module stepon
