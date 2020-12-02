@@ -51,8 +51,7 @@ public :: &
    dyn_register, &
    dyn_init,     &
    dyn_run,      &
-   dyn_final,    &
-   swap_time_level_ptrs
+   dyn_final
 
 ! Note that the fields in the import and export states are pointers into the MPAS dycore internal
 ! data structures.  These fields have the order of the vertical and horizontal dimensions swapped
@@ -219,7 +218,6 @@ real(r8), parameter :: deg2rad = pi / 180.0_r8
 integer, allocatable :: glob_ind(:)
 
 type (MPAS_TimeInterval_type) :: integrationLength ! set to CAM's dynamics/physics coupling interval
-logical :: swap_time_level_ptrs
 
 !=========================================================================================
 contains
@@ -372,6 +370,9 @@ subroutine dyn_init(dyn_in, dyn_out)
    call mpas_pool_get_dimension(mesh_pool, 'nVerticesSolve', nVerticesSolve)
    dyn_in % nVerticesSolve = nVerticesSolve
 
+   ! In MPAS timeLevel=1 is the current state.  So the fields input to the dycore should
+   ! be in timeLevel=1.
+
    call mpas_pool_get_array(state_pool, 'u',                      dyn_in % uperp,   timeLevel=1)
    call mpas_pool_get_array(state_pool, 'w',                      dyn_in % w,       timeLevel=1)
    call mpas_pool_get_array(state_pool, 'theta_m',                dyn_in % theta_m, timeLevel=1)
@@ -414,15 +415,19 @@ subroutine dyn_init(dyn_in, dyn_out)
    dyn_out % nCellsSolve    = dyn_in % nCellsSolve
    dyn_out % nEdgesSolve    = dyn_in % nEdgesSolve
    dyn_out % nVerticesSolve = dyn_in % nVerticesSolve
+   dyn_out % index_qv       = dyn_in % index_qv
 
-   call mpas_pool_get_array(state_pool, 'u',                      dyn_out % uperp,   timeLevel=2)
-   call mpas_pool_get_array(state_pool, 'w',                      dyn_out % w,       timeLevel=2)
-   call mpas_pool_get_array(state_pool, 'theta_m',                dyn_out % theta_m, timeLevel=2)
-   call mpas_pool_get_array(state_pool, 'rho_zz',                 dyn_out % rho_zz,  timeLevel=2)
-   call mpas_pool_get_array(state_pool, 'scalars',                dyn_out % tracers, timeLevel=2)
+   ! MPAS swaps pointers internally so that after a dycore timestep, the updated state is
+   ! in timeLevel=1.  Thus we want dyn_out to also point to timeLevel=1.  Can just copy
+   ! the pointers from dyn_in.
+
+   dyn_out % uperp   => dyn_in % uperp   
+   dyn_out % w       => dyn_in % w       
+   dyn_out % theta_m => dyn_in % theta_m 
+   dyn_out % rho_zz  => dyn_in % rho_zz  
+   dyn_out % tracers => dyn_in % tracers 
    
-   dyn_out % index_qv = dyn_in % index_qv
-
+   ! These components don't have a time level index.
    dyn_out % zint  => dyn_in % zint
    dyn_out % zz    => dyn_in % zz
    dyn_out % fzm   => dyn_in % fzm
@@ -453,15 +458,6 @@ subroutine dyn_init(dyn_in, dyn_out)
 
    end if
 
-   ! Initialize dyn_out from dyn_in since it is needed to run the physics package
-   ! as part of the CAM initialization before a dycore step is taken.  This is only
-   ! needed for the fields that have 2 time levels in the MPAS state_pool.
-   dyn_out % uperp(:,:nEdgesSolve)     = dyn_in % uperp(:,:nEdgesSolve)
-   dyn_out % w(:,:nCellsSolve)         = dyn_in % w(:,:nCellsSolve)
-   dyn_out % theta_m(:,:nCellsSolve)   = dyn_in % theta_m(:,:nCellsSolve)
-   dyn_out % rho_zz(:,:nCellsSolve)    = dyn_in % rho_zz(:,:nCellsSolve)
-   dyn_out % tracers(:,:,:nCellsSolve) = dyn_in % tracers(:,:,:nCellsSolve)
-
    call cam_mpas_init_phase4(endrun)
 
    ! Check that CAM's timestep, i.e., the dynamics/physics coupling interval, is an integer multiple
@@ -487,12 +483,6 @@ subroutine dyn_init(dyn_in, dyn_out)
    ! Set the interval over which the dycore should integrate during each call to dyn_run.
    call MPAS_set_timeInterval(integrationLength, S=nint(dtime), S_n=0, S_d=1)
 
-   ! MPAS updates the time level index in its state pool each dycore time step (mpas_dt).  If
-   ! the CAM timestep is an odd multiple of mpas_dt, then the pointers in the dyn_in/dyn_out
-   ! objects need a corresponding update.  Set the following logical variable to indicate
-   ! whether the pointer update is needed.
-   swap_time_level_ptrs = mod( nint(dt_ratio), 2) == 1
-
 end subroutine dyn_init
 
 !=========================================================================================
@@ -500,16 +490,36 @@ end subroutine dyn_init
 subroutine dyn_run(dyn_in, dyn_out)
 
    use cam_mpas_subdriver, only : cam_mpas_run
+   use cam_mpas_subdriver, only : domain_ptr
+   use mpas_pool_routines, only : mpas_pool_get_subpool, mpas_pool_get_array
+   use mpas_derived_types, only : mpas_pool_type
 
    ! Advances the dynamics state provided in dyn_in by one physics
    ! timestep to produce dynamics state held in dyn_out.
 
    type (dyn_import_t), intent(inout)  :: dyn_in
    type (dyn_export_t), intent(inout)  :: dyn_out
+
+   ! Local variables
+   type(mpas_pool_type), pointer :: state_pool
+
    !----------------------------------------------------------------------------
 
    ! Call the MPAS-A dycore
    call cam_mpas_run(integrationLength)
+
+   ! Update the dyn_in/dyn_out pointers to the current state of the prognostic fields.
+   call mpas_pool_get_subpool(domain_ptr % blocklist % structs, 'state', state_pool)
+   call mpas_pool_get_array(state_pool, 'u',       dyn_in % uperp,   timeLevel=1)
+   call mpas_pool_get_array(state_pool, 'w',       dyn_in % w,       timeLevel=1)
+   call mpas_pool_get_array(state_pool, 'theta_m', dyn_in % theta_m, timeLevel=1)
+   call mpas_pool_get_array(state_pool, 'rho_zz',  dyn_in % rho_zz,  timeLevel=1)
+   call mpas_pool_get_array(state_pool, 'scalars', dyn_in % tracers, timeLevel=1)
+   dyn_out % uperp   => dyn_in % uperp   
+   dyn_out % w       => dyn_in % w       
+   dyn_out % theta_m => dyn_in % theta_m 
+   dyn_out % rho_zz  => dyn_in % rho_zz  
+   dyn_out % tracers => dyn_in % tracers 
 
 end subroutine dyn_run
 
