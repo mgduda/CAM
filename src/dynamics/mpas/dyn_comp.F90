@@ -620,6 +620,9 @@ subroutine read_inidat(dyn_in)
    use mpas_derived_types, only : mpas_pool_type
    use mpas_vector_reconstruction, only : mpas_reconstruct
    use mpas_constants, only : Rv_over_Rd => rvord
+   use mpas_constants, only : rgas
+   use mpas_constants, only : p0
+   use mpas_constants, only : gravity
 
    ! arguments
    type(dyn_import_t), target, intent(inout) :: dyn_in
@@ -667,6 +670,8 @@ subroutine read_inidat(dyn_in)
    real(r8), allocatable :: pmiddry(:,:) ! dry midpoint pressures
    real(r8), allocatable :: pmid(:,:)    ! midpoint pressures
    real(r8), allocatable :: mpas3d(:,:,:)
+
+   real(r8), allocatable :: qv(:), tm(:)
 
    real(r8) :: dz, h
    logical  :: readvar
@@ -823,24 +828,40 @@ subroutine read_inidat(dyn_in)
          pintdry(1,i) = cam2d(i)
       end do
       
-      ! Use Hypsometric eqn to set pressure profiles
-      do i = 1, nCellsSolve
-         do k = 2, plevp
-            dz = zint(k,i) - zint(k-1,i)
-            h = rair * t(k-1,i) / gravit
-            pintdry(k,i) = pintdry(k-1,i)*exp(-dz/h)
-            pmiddry(k-1,i) = 0.5_r8*(pintdry(k-1,i) + pintdry(k,i))
-            ! for now assume dry atm
-            pmid(k-1,i) = pmiddry(k-1,i)
-         end do
-      end do
+      allocate(qv(plev))
+      allocate(tm(plev))
 
       do i = 1, nCellsSolve
          do k = 1, plev
-            theta(k,i) = t(k,i) * (1.0e5_r8 / pmid(k,i))**(rair/cpair)
-            rho(k,i) = pmid(k,i) / (rair * t(k,i))
+            ! convert specific humidity to mixing ratio relative to dry air
+            tracers(1,k,i) = tracers(1,k,i)/(1.0_r8 - tracers(1,k,i))
+            qv(k) = tracers(1,k,i)
+            ! convert temperature to tm (we are using dry air density and Rd in state eqn)
+            tm(k) = t(k,i)*(1.0_r8+(Rv_over_Rd)*qv(k))
          end do
+
+         ! integrate up from surface to first mid level.  This is full mid-level pressure (i.e. accounts for vapor).
+         ! we are assuming that pintdry(1,i) is the full surface pressure here.
+         pmid(1,i) = pintdry(1,i)/(1.0_r8+0.5_r8*(zint(2,i)-zint(1,i))*(1.0_r8+qv(1))*gravity/(rgas*tm(1)))
+
+         ! integrate up the column
+         do k=2,plev
+            !  this is full mid-level pressure (i.e. accounts for vapor)
+            pmid(k,i) = pmid(k-1,i)*(1.0_r8-0.5_r8*(zint(k  ,i)-zint(k-1,i))*gravity*(1.0_r8+qv(k-1))/(rgas*tm(k-1)))/ &
+                                    (1.0_r8+0.5_r8*(zint(k+1,i)-zint(k  ,i))*gravity*(1.0_r8+qv(k  ))/(rgas*tm(k  )))
+         end do
+
+         do k=1,plev
+            ! Note: this is theta and not theta_m
+            theta(k,i) = tm(k) * ((p0/pmid(k,i))**(rair/cpair))/(1.0_r8+(Rv_over_Rd)*qv(k))
+            ! Dry air density
+            rho(k,i) = pmid(k,i) / (rgas * tm(k))
+         end do
+
       end do
+
+      deallocate(qv)
+      deallocate(tm)
 
       rho_zz(:,1:nCellsSolve) = rho(:,1:nCellsSolve) / zz(:,1:nCellsSolve)
 
@@ -1057,6 +1078,8 @@ subroutine set_base_state(dyn_in)
    real(r8), dimension(:,:), pointer :: theta_base
    real(r8) :: zmid
    real(r8) :: pres
+   real(r8) :: pres_kp1
+   logical, parameter :: discrete_hydrostatic_base = .true.
    !--------------------------------------------------------------------------------------
 
    zint       => dyn_in % zint
@@ -1064,14 +1087,44 @@ subroutine set_base_state(dyn_in)
    rho_base   => dyn_in % rho_base
    theta_base => dyn_in % theta_base
 
-   do iCell = 1, dyn_in % nCellsSolve
-      do klev = 1, dyn_in % nVertLevels
-         zmid = 0.5_r8 * (zint(klev,iCell) + zint(klev+1,iCell))   ! Layer midpoint geometric height
-         pres = p0 * exp(-gravity * zmid / (Rgas * t0b))
+   ! reference state with discrete MPAS hydrostatic balance                                                 
+
+   if (discrete_hydrostatic_base) then
+
+      do iCell = 1, dyn_in % nCellsSolve
+
+         klev = dyn_in % nVertLevels
+         ! reference pressure at the model top
+         pres_kp1 = p0*exp(-gravity*zint(klev+1,iCell)/(Rgas*t0b))
+
+         ! integrate down to first mid level, set referfence state
+         pres = pres_kp1/(1.0-0.5*(zint(klev+1,iCell) - zint(klev,iCell))*gravity/(Rgas*t0b))
          theta_base(klev,iCell) = t0b / (pres / p0)**(Rgas/cp)
          rho_base(klev,iCell) = pres / ( Rgas * t0b * zz(klev,iCell))
+         pres_kp1 = pres
+
+         ! integrate down the column
+         do klev = dyn_in % nVertLevels-1, 1, -1
+            pres = pres_kp1*(1.0+0.5*(zint(klev+2,iCell)-zint(klev+1,iCell))*gravity/(rgas*t0b))/  &
+                            (1.0-0.5*(zint(klev+1,iCell)-zint(klev  ,iCell))*gravity/(rgas*t0b))
+            theta_base(klev,iCell) = t0b / (pres / p0)**(Rgas/cp)
+            rho_base(klev,iCell) = pres / ( Rgas * t0b * zz(klev,iCell))
+            pres_kp1 = pres
+         end do
       end do
-   end do
+
+   else
+
+      do iCell = 1, dyn_in % nCellsSolve
+         do klev = 1, dyn_in % nVertLevels
+            zmid = 0.5_r8 * (zint(klev,iCell) + zint(klev+1,iCell))   ! Layer midpoint geometric height
+            pres = p0 * exp(-gravity * zmid / (Rgas * t0b))
+            theta_base(klev,iCell) = t0b / (pres / p0)**(Rgas/cp)
+            rho_base(klev,iCell) = pres / ( Rgas * t0b * zz(klev,iCell))
+         end do
+      end do
+
+   end if
 
 end subroutine set_base_state
 
