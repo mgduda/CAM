@@ -15,7 +15,7 @@ use dp_coupling,    only: d_p_coupling, p_d_coupling
 
 use camsrfexch,     only: cam_out_t     
 
-use cam_history,    only: addfld, outfld, hist_fld_active
+use cam_history,    only: addfld, outfld, hist_fld_active, write_inithist
 
 use time_manager,   only: get_step_size, get_nstep, is_first_step, is_first_restart_step
 
@@ -163,6 +163,7 @@ end subroutine stepon_final
 subroutine write_dynvar(dyn_out)
 
    ! Output from the internal MPAS data structures to CAM history files.
+   ! Make call to MPAS to write an initial file when requested.
 
    ! agruments
    type(dyn_export_t), intent(in) :: dyn_out
@@ -279,6 +280,10 @@ subroutine write_dynvar(dyn_out)
       deallocate(arr2d)
    end if
 
+   if (write_inithist()) then
+      call write_initial_file()
+   end if
+
 end subroutine write_dynvar
 
 !=========================================================================================
@@ -338,6 +343,50 @@ subroutine write_forcings(dyn_in)
    deallocate(arr2d)
 
 end subroutine write_forcings
+
+!========================================================================================
+
+subroutine write_initial_file()
+
+   ! Make use of the MPAS functionality for writting a restart file to
+   ! write an initial file.
+
+   use shr_kind_mod,     only: cl=>shr_kind_cl
+   use cam_instance,     only: inst_suffix
+   use filenames,        only: interpret_filename_spec
+   use pio,              only: file_desc_t,  pio_enddef, pio_closefile
+   use cam_pio_utils,    only: cam_pio_createfile
+   use cam_abortutils,   only: endrun
+
+   use mpas_derived_types, only: MPAS_Stream_type, MPAS_IO_WRITE
+   use cam_mpas_subdriver, only: cam_mpas_setup_restart, cam_mpas_write_restart
+
+   ! Local variables
+   character(len=cl) :: filename_spec ! filename specifier
+   character(len=cl) :: fname         ! initial filename
+   type(file_desc_t) :: fh
+   integer           :: ierr
+
+   type (MPAS_Stream_type) :: initial_stream
+   !----------------------------------------------------------------------------
+
+   ! Set filename template for initial file based on instance suffix
+   ! (%c = caseid, %y = year, %m = month, %d = day, %s = seconds in day)
+   filename_spec = '%c.cam' // trim(inst_suffix) //'.i.%y-%m-%d-%s.nc'
+
+   fname = interpret_filename_spec( filename_spec )
+
+   call cam_pio_createfile(fh, trim(fname), 0)
+
+   call cam_mpas_setup_restart(fh, initial_stream, MPAS_IO_WRITE, endrun)
+
+   ierr = pio_enddef(fh)
+
+   call cam_mpas_write_restart(initial_stream, endrun)
+
+   call pio_closefile(fh)
+
+end subroutine write_initial_file
 
 !========================================================================================
 
